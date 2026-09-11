@@ -93,6 +93,8 @@ class RankingEntry(Base):
     title: Mapped[str | None] = mapped_column(String)
     brand: Mapped[str | None] = mapped_column(String)
     model: Mapped[str | None] = mapped_column(String)
+    screen_size: Mapped[str | None] = mapped_column(String)
+    ram: Mapped[str | None] = mapped_column(String)
     price: Mapped[float | None] = mapped_column(Float)
     currency_id: Mapped[str | None] = mapped_column(String(8))
     sold_quantity: Mapped[int | None] = mapped_column(Integer)
@@ -110,6 +112,8 @@ Base.metadata.create_all(engine)
 if not DATABASE_URL.startswith("sqlite"):
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE oauth_tokens ALTER COLUMN user_id TYPE BIGINT"))
+        connection.execute(text("ALTER TABLE ranking_entries ADD COLUMN IF NOT EXISTS screen_size VARCHAR"))
+        connection.execute(text("ALTER TABLE ranking_entries ADD COLUMN IF NOT EXISTS ram VARCHAR"))
 _fernet_key = base64.urlsafe_b64encode(hashlib.sha256(TOKEN_ENCRYPTION_KEY.encode()).digest())
 _cipher = Fernet(_fernet_key)
 
@@ -381,6 +385,8 @@ async def highlights(category_id: str = Path(pattern=r"^MLC\d+$"), enrich: bool 
                 "title": detail.get("name") or detail.get("title"),
                 "brand": attributes.get("BRAND"),
                 "model": attributes.get("MODEL"),
+                "screen_size": attributes.get("DISPLAY_SIZE") or attributes.get("SCREEN_SIZE"),
+                "ram": attributes.get("RAM_MEMORY") or attributes.get("RAM"),
                 "gtin": attributes.get("GTIN") or attributes.get("EAN"),
                 "price": effective_price.get("amount", buy_box.get("price", item_detail.get("price"))),
                 "regular_price": effective_price.get("regular_amount"),
@@ -425,7 +431,8 @@ def _persist_snapshot(category_id: str, payload: dict) -> tuple[RankingSnapshot,
             session.add(RankingEntry(
                 snapshot_id=snapshot.id, ranking=row.get("ranking"), resource_type=row.get("type"),
                 product_id=row.get("product_id"), item_id=row.get("item_id"), title=row.get("title"),
-                brand=row.get("brand"), model=row.get("model"), price=row.get("price"),
+                brand=row.get("brand"), model=row.get("model"),
+                screen_size=row.get("screen_size"), ram=row.get("ram"), price=row.get("price"),
                 currency_id=row.get("currency_id"), sold_quantity=row.get("sold_quantity"),
                 product_sold_quantity=row.get("product_sold_quantity"),
                 available_quantity=row.get("available_quantity"), image=row.get("image"),
@@ -516,6 +523,7 @@ async def dashboard_data():
                     "ranking": entry.ranking, "product_id": entry.product_id,
                     "item_id": entry.item_id, "title": entry.title,
                     "brand": entry.brand, "model": entry.model, "price": entry.price,
+                    "screen_size": entry.screen_size, "ram": entry.ram,
                     "currency_id": entry.currency_id,
                     "sold_quantity": entry.sold_quantity,
                     "product_sold_quantity": entry.product_sold_quantity,
