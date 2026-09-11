@@ -36,6 +36,7 @@ TOKEN_ENCRYPTION_KEY = os.getenv("TOKEN_ENCRYPTION_KEY", "local-development-only
 SNAPSHOT_CATEGORIES = tuple(filter(None, os.getenv("SNAPSHOT_CATEGORIES", "MLC1055").split(",")))
 ENABLE_SNAPSHOT_SCHEDULER = os.getenv("ENABLE_SNAPSHOT_SCHEDULER", "false").lower() == "true"
 SNAPSHOT_API_KEY = os.getenv("SNAPSHOT_API_KEY", "")
+USD_CLP_FALLBACK = float(os.getenv("USD_CLP_FALLBACK", "930"))
 SANTIAGO_TZ = ZoneInfo("America/Santiago")
 PROJECT_DIR = FilePath(__file__).resolve().parent
 CATEGORY_LABELS = {
@@ -607,7 +608,11 @@ async def _usd_clp_rate() -> dict | None:
         if stored:
             _usd_rate_cache.update(rate=stored.clp_per_usd, date=stored.observed_at,
                                    source=stored.source, cached_at=stored.fetched_at, stale=True)
-    return _usd_rate_cache or None
+    if _usd_rate_cache:
+        return _usd_rate_cache
+    return {"rate": USD_CLP_FALLBACK, "date": None,
+            "source": "referencia MiFly", "cached_at": time.time(),
+            "stale": True, "fallback": True}
 
 
 @app.get("/api/v1/dashboard")
@@ -687,7 +692,8 @@ async def dashboard_data():
             })
     return {"generated_at": datetime.now(SANTIAGO_TZ),
             "exchange_rate": {"clp_per_usd": fx["rate"], "date": fx.get("date"),
-                              "source": fx.get("source"), "stale": fx.get("stale", False)}
+                              "source": fx.get("source"), "stale": fx.get("stale", False),
+                              "fallback": fx.get("fallback", False)}
             if fx else None,
             "categories": categories}
 

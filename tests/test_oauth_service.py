@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import hashlib
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
@@ -257,3 +258,25 @@ def test_product_history_summarizes_positions(monkeypatch):
 def test_product_history_returns_404_for_unknown_resource(monkeypatch):
     client = configured_client(monkeypatch)
     assert client.get("/api/v1/products/MLC999/history").status_code == 404
+
+
+def test_exchange_rate_uses_930_when_all_sources_and_cache_fail(monkeypatch):
+    configured_client(monkeypatch)
+    main._usd_rate_cache.clear()
+
+    class FailingClient:
+        def __init__(self, *args, **kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            return None
+        async def get(self, *args, **kwargs):
+            raise RuntimeError("source unavailable")
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", FailingClient)
+    rate = asyncio.run(main._usd_clp_rate())
+
+    assert rate["rate"] == 930
+    assert rate["fallback"] is True
+    assert rate["source"] == "referencia MiFly"
