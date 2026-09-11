@@ -8,6 +8,7 @@ import os
 import secrets
 import time
 from datetime import datetime
+from pathlib import Path as FilePath
 from typing import Optional
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -35,6 +36,20 @@ SNAPSHOT_CATEGORIES = tuple(filter(None, os.getenv("SNAPSHOT_CATEGORIES", "MLC10
 ENABLE_SNAPSHOT_SCHEDULER = os.getenv("ENABLE_SNAPSHOT_SCHEDULER", "false").lower() == "true"
 SNAPSHOT_API_KEY = os.getenv("SNAPSHOT_API_KEY", "")
 SANTIAGO_TZ = ZoneInfo("America/Santiago")
+PROJECT_DIR = FilePath(__file__).resolve().parent
+CATEGORY_LABELS = {
+    "MLC1055": "Celulares y Smartphones",
+    "MLC82067": "Tablets",
+    "MLC3697": "Audífonos",
+    "MLC172568": "Parlantes portátiles",
+    "MLC180993": "Aspiradoras robot",
+    "MLC4337": "Aspiradoras (incluye verticales)",
+    "MLC4660": "Cámaras de acción",
+    "MLC175541": "Estabilizadores",
+    "MLC179485": "Drones",
+    "MLC4597": "Secadores de pelo",
+    "MLC178457": "Alisadores de pelo",
+}
 LOGGER = logging.getLogger("topsellers")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
@@ -190,16 +205,9 @@ async def _access_token() -> str:
     return (await _refresh_persisted_token())["access_token"]
 
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 def root():
-    return {
-        "service": "MiFly Market Intelligence - TopSellers",
-        "version": app.version,
-        "authorized": _valid_token() is not None,
-        "redirect_uri_configured": REDIRECT_URI or None,
-        "endpoints": ["/health", "/oauth/login", "/oauth/callback", "/oauth/refresh",
-                      "/api/v1/me", "/api/v1/highlights/{category_id}", "/docs"],
-    }
+    return HTMLResponse((PROJECT_DIR / "static" / "dashboard.html").read_text(encoding="utf-8"))
 
 
 @app.get("/health")
@@ -450,6 +458,40 @@ def category_history(category_id: str = Path(pattern=r"^MLC\d+$"), limit: int = 
                              "image": entry.image} for entry in entries],
             })
         return {"category_id": category_id, "count": len(result), "snapshots": result}
+
+
+@app.get("/api/v1/dashboard")
+def dashboard_data():
+    """Return the latest stored snapshot for each configured business category."""
+    categories = []
+    with Session(engine) as session:
+        for category_id in SNAPSHOT_CATEGORIES:
+            snapshot = session.scalar(select(RankingSnapshot).where(
+                RankingSnapshot.category_id == category_id
+            ).order_by(RankingSnapshot.captured_at.desc()).limit(1))
+            rows = []
+            if snapshot:
+                entries = session.scalars(select(RankingEntry).where(
+                    RankingEntry.snapshot_id == snapshot.id
+                ).order_by(RankingEntry.ranking)).all()
+                rows = [{
+                    "ranking": entry.ranking, "product_id": entry.product_id,
+                    "item_id": entry.item_id, "title": entry.title,
+                    "brand": entry.brand, "model": entry.model, "price": entry.price,
+                    "currency_id": entry.currency_id,
+                    "sold_quantity": entry.sold_quantity,
+                    "product_sold_quantity": entry.product_sold_quantity,
+                    "available_quantity": entry.available_quantity, "image": entry.image,
+                } for entry in entries]
+            categories.append({
+                "category_id": category_id,
+                "name": CATEGORY_LABELS.get(category_id, category_id),
+                "snapshot_date": snapshot.snapshot_date if snapshot else None,
+                "captured_at": snapshot.captured_at if snapshot else None,
+                "result_count": snapshot.result_count if snapshot else 0,
+                "results": rows,
+            })
+    return {"generated_at": datetime.now(SANTIAGO_TZ), "categories": categories}
 
 
 @app.get("/api/v1/categories/{category_id}/movements")

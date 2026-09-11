@@ -30,6 +30,14 @@ def test_health_reports_complete_configuration(monkeypatch):
                                "persistent_storage": False, "token_valid": False}
 
 
+def test_root_serves_dashboard(monkeypatch):
+    client = configured_client(monkeypatch)
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "MiFly Market Intelligence" in response.text
+    assert "Top Sellers" in response.text
+
+
 def test_login_redirect_contains_state_without_secret(monkeypatch):
     client = configured_client(monkeypatch)
     response = client.get("/oauth/login", follow_redirects=False)
@@ -157,3 +165,18 @@ def test_movements_reports_up_new_and_dropped_products(monkeypatch):
     assert payload["movements"][0]["movement"] == 1
     assert payload["movements"][1]["status"] == "new"
     assert payload["dropped"][0]["product_id"] == "MLC-OUT"
+
+
+def test_dashboard_returns_latest_snapshot(monkeypatch):
+    client = configured_client(monkeypatch)
+    monkeypatch.setattr(main, "SNAPSHOT_CATEGORIES", ("MLC1055",))
+    main._persist_snapshot("MLC1055", {"results": [
+        {"ranking": 1, "type": "PRODUCT", "product_id": "MLC1",
+         "title": "Teléfono", "brand": "Marca"}
+    ]})
+
+    payload = client.get("/api/v1/dashboard").json()
+
+    assert payload["categories"][0]["name"] == "Celulares y Smartphones"
+    assert payload["categories"][0]["result_count"] == 1
+    assert payload["categories"][0]["results"][0]["title"] == "Teléfono"
