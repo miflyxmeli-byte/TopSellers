@@ -14,6 +14,8 @@ def configured_client(monkeypatch):
     monkeypatch.setattr(main, "REDIRECT_URI", "https://example.test/oauth/callback")
     main._store.clear()
     with main.Session(main.engine) as session:
+        session.execute(delete(main.RankingEntry))
+        session.execute(delete(main.RankingSnapshot))
         session.execute(delete(main.OAuthToken))
         session.commit()
     return TestClient(main.app)
@@ -93,3 +95,17 @@ def test_access_token_refreshes_inside_margin(monkeypatch):
     import asyncio
     assert asyncio.run(main._access_token()) == "renewed"
     assert called == [False]
+
+
+def test_snapshot_is_persisted_once_per_category_and_day(monkeypatch):
+    client = configured_client(monkeypatch)
+    payload = {"results": [{"ranking": 1, "type": "PRODUCT", "product_id": "MLC1",
+                            "title": "Example", "brand": "Brand"}]}
+    first, first_created = main._persist_snapshot("MLC1055", payload)
+    second, second_created = main._persist_snapshot("MLC1055", payload)
+    assert first_created is True
+    assert second_created is False
+    assert first.id == second.id
+    history = client.get("/api/v1/categories/MLC1055/history").json()
+    assert history["count"] == 1
+    assert history["snapshots"][0]["results"][0]["product_id"] == "MLC1"

@@ -55,6 +55,14 @@ and prices resources. `sold_quantity` is item-level cumulative sales, not total
 sales for the catalog product or the quantity used to calculate the ranking.
 When Mercado Libre exposes it, `product_sold_quantity` is reported separately.
 
+## Historical snapshots
+
+With `ENABLE_SNAPSHOT_SCHEDULER=true`, the service captures the categories in
+`SNAPSHOT_CATEGORIES` every day at 06:00 America/Santiago. One snapshot per
+category/day is enforced in PostgreSQL. History is available at
+`GET /api/v1/categories/{category_id}/history`; protected manual execution uses
+`POST /api/v1/snapshots/run?category_id=...` with the `X-Snapshot-Key` header.
+
 Access and refresh tokens are encrypted by the application and persisted in
 PostgreSQL. Configure `DATABASE_URL` and a stable, random
 `TOKEN_ENCRYPTION_KEY`; changing the encryption key invalidates stored tokens.

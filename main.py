@@ -3,17 +3,23 @@
 import base64
 import asyncio
 import hashlib
+import logging
 import os
 import secrets
 import time
+from datetime import datetime
 from typing import Optional
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import httpx
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from cryptography.fernet import Fernet
-from fastapi import FastAPI, HTTPException, Path, Query
+from fastapi import FastAPI, Header, HTTPException, Path, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import BigInteger, Float, Integer, String, create_engine, select, text
+from sqlalchemy import (BigInteger, Boolean, DateTime, Float, ForeignKey, Integer,
+                        String, UniqueConstraint, create_engine, select, text)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from sqlalchemy.pool import StaticPool
 
@@ -25,6 +31,11 @@ API_BASE = "https://api.mercadolibre.com"
 TOKEN_URL = f"{API_BASE}/oauth/token"
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///:memory:")
 TOKEN_ENCRYPTION_KEY = os.getenv("TOKEN_ENCRYPTION_KEY", "local-development-only")
+SNAPSHOT_CATEGORIES = tuple(filter(None, os.getenv("SNAPSHOT_CATEGORIES", "MLC1055").split(",")))
+ENABLE_SNAPSHOT_SCHEDULER = os.getenv("ENABLE_SNAPSHOT_SCHEDULER", "false").lower() == "true"
+SNAPSHOT_API_KEY = os.getenv("SNAPSHOT_API_KEY", "")
+SANTIAGO_TZ = ZoneInfo("America/Santiago")
+LOGGER = logging.getLogger("topsellers")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
 elif DATABASE_URL.startswith("postgresql://"):
@@ -42,6 +53,38 @@ class OAuthToken(Base):
     refresh_token: Mapped[str | None] = mapped_column(String, nullable=True)
     user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     expires_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class RankingSnapshot(Base):
+    __tablename__ = "ranking_snapshots"
+    __table_args__ = (UniqueConstraint("category_id", "snapshot_date",
+                                      name="uq_snapshot_category_date"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    category_id: Mapped[str] = mapped_column(String(32), index=True)
+    snapshot_date: Mapped[str] = mapped_column(String(10), index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    result_count: Mapped[int] = mapped_column(Integer)
+
+
+class RankingEntry(Base):
+    __tablename__ = "ranking_entries"
+    __table_args__ = (UniqueConstraint("snapshot_id", "ranking", name="uq_snapshot_ranking"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_id: Mapped[int] = mapped_column(ForeignKey("ranking_snapshots.id", ondelete="CASCADE"), index=True)
+    ranking: Mapped[int] = mapped_column(Integer)
+    resource_type: Mapped[str | None] = mapped_column(String(32))
+    product_id: Mapped[str | None] = mapped_column(String(64))
+    item_id: Mapped[str | None] = mapped_column(String(64))
+    title: Mapped[str | None] = mapped_column(String)
+    brand: Mapped[str | None] = mapped_column(String)
+    model: Mapped[str | None] = mapped_column(String)
+    price: Mapped[float | None] = mapped_column(Float)
+    currency_id: Mapped[str | None] = mapped_column(String(8))
+    sold_quantity: Mapped[int | None] = mapped_column(Integer)
+    product_sold_quantity: Mapped[int | None] = mapped_column(Integer)
+    available_quantity: Mapped[int | None] = mapped_column(Integer)
+    image: Mapped[str | None] = mapped_column(String)
+    buy_box_winner_available: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 engine_options = {"pool_pre_ping": True}
@@ -65,6 +108,7 @@ app = FastAPI(
 _store: dict = {}
 _refresh_lock = asyncio.Lock()
 REFRESH_MARGIN_SECONDS = 300
+_scheduler: AsyncIOScheduler | None = None
 
 
 def _encrypt(value: str | None) -> str | None:
@@ -332,6 +376,108 @@ async def highlights(category_id: str = Path(pattern=r"^MLC\d+$"), enrich: bool 
                 "price_status": price_status,
             })
     return {"query_data": payload.get("query_data"), "count": len(rows), "results": rows}
+
+
+def _persist_snapshot(category_id: str, payload: dict) -> tuple[RankingSnapshot, bool]:
+    captured_at = datetime.now(SANTIAGO_TZ)
+    snapshot_date = captured_at.date().isoformat()
+    with Session(engine) as session:
+        existing = session.scalar(select(RankingSnapshot).where(
+            RankingSnapshot.category_id == category_id,
+            RankingSnapshot.snapshot_date == snapshot_date,
+        ))
+        if existing:
+            return existing, False
+        rows = payload.get("results") or []
+        snapshot = RankingSnapshot(category_id=category_id, snapshot_date=snapshot_date,
+                                   captured_at=captured_at, result_count=len(rows))
+        session.add(snapshot)
+        session.flush()
+        for row in rows:
+            session.add(RankingEntry(
+                snapshot_id=snapshot.id, ranking=row.get("ranking"), resource_type=row.get("type"),
+                product_id=row.get("product_id"), item_id=row.get("item_id"), title=row.get("title"),
+                brand=row.get("brand"), model=row.get("model"), price=row.get("price"),
+                currency_id=row.get("currency_id"), sold_quantity=row.get("sold_quantity"),
+                product_sold_quantity=row.get("product_sold_quantity"),
+                available_quantity=row.get("available_quantity"), image=row.get("image"),
+                buy_box_winner_available=bool(row.get("buy_box_winner_available")),
+            ))
+        session.commit()
+        session.refresh(snapshot)
+        return snapshot, True
+
+
+async def capture_snapshot(category_id: str) -> dict:
+    payload = await highlights(category_id=category_id, enrich=True)
+    snapshot, created = _persist_snapshot(category_id, payload)
+    return {"snapshot_id": snapshot.id, "category_id": category_id,
+            "snapshot_date": snapshot.snapshot_date, "result_count": snapshot.result_count,
+            "created": created}
+
+
+@app.post("/api/v1/snapshots/run")
+async def run_snapshot(category_id: str = Query(pattern=r"^MLC\d+$"),
+                       x_snapshot_key: str | None = Header(None)):
+    if not SNAPSHOT_API_KEY or not x_snapshot_key or not secrets.compare_digest(
+        x_snapshot_key, SNAPSHOT_API_KEY
+    ):
+        raise HTTPException(401, "Snapshot API key inválida")
+    return await capture_snapshot(category_id)
+
+
+@app.get("/api/v1/categories/{category_id}/history")
+def category_history(category_id: str = Path(pattern=r"^MLC\d+$"), limit: int = Query(30, ge=1, le=365)):
+    with Session(engine) as session:
+        snapshots = session.scalars(select(RankingSnapshot).where(
+            RankingSnapshot.category_id == category_id
+        ).order_by(RankingSnapshot.captured_at.desc()).limit(limit)).all()
+        result = []
+        for snapshot in snapshots:
+            entries = session.scalars(select(RankingEntry).where(
+                RankingEntry.snapshot_id == snapshot.id
+            ).order_by(RankingEntry.ranking)).all()
+            result.append({
+                "snapshot_id": snapshot.id, "snapshot_date": snapshot.snapshot_date,
+                "captured_at": snapshot.captured_at, "result_count": snapshot.result_count,
+                "results": [{"ranking": entry.ranking, "type": entry.resource_type,
+                             "product_id": entry.product_id, "item_id": entry.item_id,
+                             "title": entry.title, "brand": entry.brand, "model": entry.model,
+                             "price": entry.price, "currency_id": entry.currency_id,
+                             "sold_quantity": entry.sold_quantity,
+                             "product_sold_quantity": entry.product_sold_quantity,
+                             "available_quantity": entry.available_quantity,
+                             "image": entry.image} for entry in entries],
+            })
+        return {"category_id": category_id, "count": len(result), "snapshots": result}
+
+
+async def _scheduled_snapshots() -> None:
+    for category_id in SNAPSHOT_CATEGORIES:
+        try:
+            await capture_snapshot(category_id)
+        except Exception:
+            LOGGER.exception("Scheduled snapshot failed for %s", category_id)
+
+
+@app.on_event("startup")
+async def start_snapshot_scheduler() -> None:
+    global _scheduler
+    if not ENABLE_SNAPSHOT_SCHEDULER or _scheduler:
+        return
+    _scheduler = AsyncIOScheduler(timezone=SANTIAGO_TZ)
+    _scheduler.add_job(_scheduled_snapshots, CronTrigger(hour=6, minute=0, timezone=SANTIAGO_TZ),
+                       id="daily_mlc_snapshots", replace_existing=True, max_instances=1,
+                       coalesce=True, misfire_grace_time=3600)
+    _scheduler.start()
+
+
+@app.on_event("shutdown")
+async def stop_snapshot_scheduler() -> None:
+    global _scheduler
+    if _scheduler:
+        _scheduler.shutdown(wait=False)
+        _scheduler = None
 
 
 if __name__ == "__main__":
