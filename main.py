@@ -98,6 +98,8 @@ class RankingEntry(Base):
     model: Mapped[str | None] = mapped_column(String)
     screen_size: Mapped[str | None] = mapped_column(String)
     ram: Mapped[str | None] = mapped_column(String)
+    suction_pa: Mapped[float | None] = mapped_column(Float)
+    suction_source: Mapped[str | None] = mapped_column(String(32))
     price: Mapped[float | None] = mapped_column(Float)
     currency_id: Mapped[str | None] = mapped_column(String(8))
     sold_quantity: Mapped[int | None] = mapped_column(Integer)
@@ -119,6 +121,8 @@ if not DATABASE_URL.startswith("sqlite"):
         connection.execute(text("ALTER TABLE ranking_entries ADD COLUMN IF NOT EXISTS ram VARCHAR"))
         connection.execute(text("ALTER TABLE ranking_entries ADD COLUMN IF NOT EXISTS user_product_id VARCHAR(64)"))
         connection.execute(text("ALTER TABLE ranking_entries ADD COLUMN IF NOT EXISTS detail_restricted BOOLEAN DEFAULT FALSE"))
+        connection.execute(text("ALTER TABLE ranking_entries ADD COLUMN IF NOT EXISTS suction_pa DOUBLE PRECISION"))
+        connection.execute(text("ALTER TABLE ranking_entries ADD COLUMN IF NOT EXISTS suction_source VARCHAR(32)"))
 _fernet_key = base64.urlsafe_b64encode(hashlib.sha256(TOKEN_ENCRYPTION_KEY.encode()).digest())
 _cipher = Fernet(_fernet_key)
 
@@ -151,6 +155,36 @@ def _vacuum_group(category_id: str, title: str | None, model: str | None) -> str
     if category_id == "MLC180993" or re.search(r"\brobot(?:ica|izada|izado|ic)?s?\b", description):
         return "robot"
     return "other"
+
+
+def _pressure_to_pa(value: str | None) -> float | None:
+    match = re.search(r"(\d{1,3}(?:[.,]\d{3})+|\d+(?:[.,]\d+)?)\s*(kpa|pa)\b",
+                      value or "", re.IGNORECASE)
+    if not match:
+        return None
+    number, unit = match.groups()
+    if unit.lower() == "pa" and re.fullmatch(r"\d{1,3}(?:[.,]\d{3})+", number):
+        amount = float(re.sub(r"[.,]", "", number))
+    else:
+        amount = float(number.replace(",", "."))
+    return amount * 1000 if unit.lower() == "kpa" else amount
+
+
+def _extract_suction_pa(attributes: list[dict], title: str | None) -> tuple[float | None, str | None]:
+    for attribute in attributes:
+        identity = f"{attribute.get('id', '')} {attribute.get('name', '')}".lower()
+        if not any(term in identity for term in ("suction", "succión", "succion")):
+            continue
+        structured = attribute.get("value_struct") or {}
+        unit = str(structured.get("unit", "")).lower()
+        if structured.get("number") is not None and unit in {"pa", "kpa"}:
+            amount = float(structured["number"])
+            return (amount * 1000 if unit == "kpa" else amount), "attribute"
+        parsed = _pressure_to_pa(attribute.get("value_name"))
+        if parsed is not None:
+            return parsed, "attribute"
+    parsed = _pressure_to_pa(title)
+    return (parsed, "title") if parsed is not None else (None, None)
 
 
 def _token_record() -> OAuthToken | None:
@@ -391,6 +425,9 @@ async def highlights(category_id: str = Path(pattern=r"^MLC\d+$"), enrich: bool 
             pictures = detail.get("pictures") or []
             image = pictures[0].get("secure_url") or pictures[0].get("url") \
                 if pictures and isinstance(pictures[0], dict) else detail.get("thumbnail")
+            suction_pa, suction_source = _extract_suction_pa(
+                detail.get("attributes") or [], detail.get("name") or detail.get("title")
+            )
             rows.append({
                 "ranking": entry.get("position"),
                 "type": resource_type,
@@ -403,6 +440,8 @@ async def highlights(category_id: str = Path(pattern=r"^MLC\d+$"), enrich: bool 
                 "model": attributes.get("MODEL"),
                 "screen_size": attributes.get("DISPLAY_SIZE") or attributes.get("SCREEN_SIZE"),
                 "ram": attributes.get("RAM_MEMORY") or attributes.get("RAM"),
+                "suction_pa": suction_pa,
+                "suction_source": suction_source,
                 "gtin": attributes.get("GTIN") or attributes.get("EAN"),
                 "price": effective_price.get("amount", buy_box.get("price", item_detail.get("price"))),
                 "regular_price": effective_price.get("regular_amount"),
@@ -450,7 +489,9 @@ def _persist_snapshot(category_id: str, payload: dict) -> tuple[RankingSnapshot,
                 user_product_id=row.get("user_product_id"),
                 detail_restricted=bool(row.get("detail_restricted")),
                 brand=row.get("brand"), model=row.get("model"),
-                screen_size=row.get("screen_size"), ram=row.get("ram"), price=row.get("price"),
+                screen_size=row.get("screen_size"), ram=row.get("ram"),
+                suction_pa=row.get("suction_pa"), suction_source=row.get("suction_source"),
+                price=row.get("price"),
                 currency_id=row.get("currency_id"), sold_quantity=row.get("sold_quantity"),
                 product_sold_quantity=row.get("product_sold_quantity"),
                 available_quantity=row.get("available_quantity"), image=row.get("image"),
@@ -563,6 +604,7 @@ async def dashboard_data():
                     "source_category_id": category_id,
                     "source_category_name": CATEGORY_LABELS.get(category_id, category_id),
                     "screen_size": entry.screen_size, "ram": entry.ram,
+                    "suction_pa": entry.suction_pa, "suction_source": entry.suction_source,
                     "currency_id": entry.currency_id,
                     "sold_quantity": entry.sold_quantity,
                     "product_sold_quantity": entry.product_sold_quantity,

@@ -210,3 +210,17 @@ def test_restricted_user_product_keeps_its_public_ranking_id(monkeypatch):
 
     assert row["user_product_id"] == "MLCU55760760"
     assert row["detail_restricted"] is True
+
+
+def test_suction_pressure_is_normalized_to_pascals():
+    assert main._pressure_to_pa("Potencia de succión 7000 Pa") == 7000
+    assert main._pressure_to_pa("Presión de succión: 5,5 kPa") == 5500
+    assert main._pressure_to_pa("Succión máxima 15.000pa") == 15000
+    assert main._pressure_to_pa("Potencia 120 W") is None
+
+    value, source = main._extract_suction_pa([{
+        "id": "SUCTION_PRESSURE", "name": "Presión de succión",
+        "value_struct": {"number": 6, "unit": "kPa"},
+    }], "Modelo sin presión en el título")
+    assert value == 6000
+    assert source == "attribute"
