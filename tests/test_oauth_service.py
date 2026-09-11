@@ -280,3 +280,21 @@ def test_exchange_rate_uses_930_when_all_sources_and_cache_fail(monkeypatch):
     assert rate["rate"] == 930
     assert rate["fallback"] is True
     assert rate["source"] == "referencia MiFly"
+
+
+def test_robot_vacuum_cost_per_pascal(monkeypatch):
+    client = configured_client(monkeypatch)
+    monkeypatch.setattr(main, "SNAPSHOT_CATEGORIES", ("MLC180993",))
+    async def fake_rate():
+        return {"rate": 930.0, "source": "test", "cached_at": 1}
+    monkeypatch.setattr(main, "_usd_clp_rate", fake_rate)
+    main._persist_snapshot("MLC180993", {"results": [{
+        "ranking": 1, "type": "PRODUCT", "product_id": "MLC7000",
+        "title": "Robot aspiradora 7000 Pa", "price": 350000,
+        "currency_id": "CLP", "suction_pa": 7000,
+    }]})
+
+    payload = client.get("/api/v1/dashboard").json()
+    category = next(row for row in payload["categories"] if row["category_id"] == "MLC180993")
+
+    assert category["results"][0]["cost_per_pascal_clp"] == 50.0

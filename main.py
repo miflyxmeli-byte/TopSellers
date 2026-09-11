@@ -645,6 +645,7 @@ async def dashboard_data():
                     suction_source = entry.suction_source
                     if suction_pa is None:
                         suction_pa, suction_source = _extract_suction_pa([], entry.title)
+                    vacuum_group = _vacuum_group(category_id, entry.title, entry.model)
                     rows.append({
                     "ranking": entry.ranking,
                     "previous_position": previous_positions.get(_entry_identity(entry)),
@@ -657,11 +658,13 @@ async def dashboard_data():
                     "item_id": entry.item_id, "user_product_id": entry.user_product_id,
                     "detail_restricted": entry.detail_restricted, "title": entry.title,
                     "brand": entry.brand, "model": entry.model, "price": entry.price,
-                    "vacuum_group": _vacuum_group(category_id, entry.title, entry.model),
+                    "vacuum_group": vacuum_group,
                     "source_category_id": category_id,
                     "source_category_name": CATEGORY_LABELS.get(category_id, category_id),
                     "screen_size": entry.screen_size, "ram": entry.ram,
                     "suction_pa": suction_pa, "suction_source": suction_source,
+                    "cost_per_pascal_clp": round(entry.price / suction_pa, 2)
+                    if vacuum_group == "robot" and entry.price is not None and suction_pa else None,
                     "currency_id": entry.currency_id,
                     "sold_quantity": entry.sold_quantity,
                     "product_sold_quantity": entry.product_sold_quantity,
