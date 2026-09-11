@@ -511,16 +511,31 @@ async def dashboard_data():
     fx = await _usd_clp_rate()
     with Session(engine) as session:
         for category_id in SNAPSHOT_CATEGORIES:
-            snapshot = session.scalar(select(RankingSnapshot).where(
+            snapshots = session.scalars(select(RankingSnapshot).where(
                 RankingSnapshot.category_id == category_id
-            ).order_by(RankingSnapshot.captured_at.desc()).limit(1))
+            ).order_by(RankingSnapshot.captured_at.desc()).limit(2)).all()
+            snapshot = snapshots[0] if snapshots else None
+            previous_positions = {}
+            if len(snapshots) > 1:
+                previous_entries = session.scalars(select(RankingEntry).where(
+                    RankingEntry.snapshot_id == snapshots[1].id
+                )).all()
+                previous_positions = {(entry.product_id or entry.item_id): entry.ranking
+                                      for entry in previous_entries
+                                      if entry.product_id or entry.item_id}
             rows = []
             if snapshot:
                 entries = session.scalars(select(RankingEntry).where(
                     RankingEntry.snapshot_id == snapshot.id
                 ).order_by(RankingEntry.ranking)).all()
                 rows = [{
-                    "ranking": entry.ranking, "product_id": entry.product_id,
+                    "ranking": entry.ranking,
+                    "previous_position": previous_positions.get(entry.product_id or entry.item_id),
+                    "movement": (previous_positions.get(entry.product_id or entry.item_id) - entry.ranking)
+                    if previous_positions.get(entry.product_id or entry.item_id) is not None else None,
+                    "movement_status": "new" if previous_positions and
+                    previous_positions.get(entry.product_id or entry.item_id) is None else "pending",
+                    "product_id": entry.product_id,
                     "item_id": entry.item_id, "title": entry.title,
                     "brand": entry.brand, "model": entry.model, "price": entry.price,
                     "screen_size": entry.screen_size, "ram": entry.ram,
@@ -535,6 +550,7 @@ async def dashboard_data():
                 "category_id": category_id,
                 "name": CATEGORY_LABELS.get(category_id, category_id),
                 "snapshot_date": snapshot.snapshot_date if snapshot else None,
+                "previous_date": snapshots[1].snapshot_date if len(snapshots) > 1 else None,
                 "captured_at": snapshot.captured_at if snapshot else None,
                 "result_count": snapshot.result_count if snapshot else 0,
                 "results": rows,
