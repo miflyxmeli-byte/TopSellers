@@ -91,6 +91,8 @@ class RankingEntry(Base):
     resource_type: Mapped[str | None] = mapped_column(String(32))
     product_id: Mapped[str | None] = mapped_column(String(64))
     item_id: Mapped[str | None] = mapped_column(String(64))
+    user_product_id: Mapped[str | None] = mapped_column(String(64))
+    detail_restricted: Mapped[bool] = mapped_column(Boolean, default=False)
     title: Mapped[str | None] = mapped_column(String)
     brand: Mapped[str | None] = mapped_column(String)
     model: Mapped[str | None] = mapped_column(String)
@@ -115,6 +117,8 @@ if not DATABASE_URL.startswith("sqlite"):
         connection.execute(text("ALTER TABLE oauth_tokens ALTER COLUMN user_id TYPE BIGINT"))
         connection.execute(text("ALTER TABLE ranking_entries ADD COLUMN IF NOT EXISTS screen_size VARCHAR"))
         connection.execute(text("ALTER TABLE ranking_entries ADD COLUMN IF NOT EXISTS ram VARCHAR"))
+        connection.execute(text("ALTER TABLE ranking_entries ADD COLUMN IF NOT EXISTS user_product_id VARCHAR(64)"))
+        connection.execute(text("ALTER TABLE ranking_entries ADD COLUMN IF NOT EXISTS detail_restricted BOOLEAN DEFAULT FALSE"))
 _fernet_key = base64.urlsafe_b64encode(hashlib.sha256(TOKEN_ENCRYPTION_KEY.encode()).digest())
 _cipher = Fernet(_fernet_key)
 
@@ -392,6 +396,8 @@ async def highlights(category_id: str = Path(pattern=r"^MLC\d+$"), enrich: bool 
                 "type": resource_type,
                 "product_id": resource_id if resource_type == "PRODUCT" else detail.get("catalog_product_id"),
                 "item_id": resource_id if resource_type == "ITEM" else winner_item_id or detail.get("item_id"),
+                "user_product_id": resource_id if resource_type == "USER_PRODUCT" else None,
+                "detail_restricted": resource_type == "USER_PRODUCT" and detail_status == 403,
                 "title": detail.get("name") or detail.get("title"),
                 "brand": attributes.get("BRAND"),
                 "model": attributes.get("MODEL"),
@@ -441,6 +447,8 @@ def _persist_snapshot(category_id: str, payload: dict) -> tuple[RankingSnapshot,
             session.add(RankingEntry(
                 snapshot_id=snapshot.id, ranking=row.get("ranking"), resource_type=row.get("type"),
                 product_id=row.get("product_id"), item_id=row.get("item_id"), title=row.get("title"),
+                user_product_id=row.get("user_product_id"),
+                detail_restricted=bool(row.get("detail_restricted")),
                 brand=row.get("brand"), model=row.get("model"),
                 screen_size=row.get("screen_size"), ram=row.get("ram"), price=row.get("price"),
                 currency_id=row.get("currency_id"), sold_quantity=row.get("sold_quantity"),
@@ -486,7 +494,9 @@ def category_history(category_id: str = Path(pattern=r"^MLC\d+$"), limit: int = 
                 "snapshot_id": snapshot.id, "snapshot_date": snapshot.snapshot_date,
                 "captured_at": snapshot.captured_at, "result_count": snapshot.result_count,
                 "results": [{"ranking": entry.ranking, "type": entry.resource_type,
-                             "product_id": entry.product_id, "item_id": entry.item_id,
+                        "product_id": entry.product_id, "item_id": entry.item_id,
+                        "user_product_id": entry.user_product_id,
+                        "detail_restricted": entry.detail_restricted,
                              "title": entry.title, "brand": entry.brand, "model": entry.model,
                              "price": entry.price, "currency_id": entry.currency_id,
                              "sold_quantity": entry.sold_quantity,
@@ -530,9 +540,9 @@ async def dashboard_data():
                 previous_entries = session.scalars(select(RankingEntry).where(
                     RankingEntry.snapshot_id == snapshots[1].id
                 )).all()
-                previous_positions = {(entry.product_id or entry.item_id): entry.ranking
+                previous_positions = {(entry.product_id or entry.item_id or entry.user_product_id): entry.ranking
                                       for entry in previous_entries
-                                      if entry.product_id or entry.item_id}
+                                      if entry.product_id or entry.item_id or entry.user_product_id}
             rows = []
             if snapshot:
                 entries = session.scalars(select(RankingEntry).where(
@@ -540,13 +550,14 @@ async def dashboard_data():
                 ).order_by(RankingEntry.ranking)).all()
                 rows = [{
                     "ranking": entry.ranking,
-                    "previous_position": previous_positions.get(entry.product_id or entry.item_id),
-                    "movement": (previous_positions.get(entry.product_id or entry.item_id) - entry.ranking)
-                    if previous_positions.get(entry.product_id or entry.item_id) is not None else None,
+                    "previous_position": previous_positions.get(entry.product_id or entry.item_id or entry.user_product_id),
+                    "movement": (previous_positions.get(entry.product_id or entry.item_id or entry.user_product_id) - entry.ranking)
+                    if previous_positions.get(entry.product_id or entry.item_id or entry.user_product_id) is not None else None,
                     "movement_status": "new" if previous_positions and
-                    previous_positions.get(entry.product_id or entry.item_id) is None else "pending",
+                    previous_positions.get(entry.product_id or entry.item_id or entry.user_product_id) is None else "pending",
                     "product_id": entry.product_id,
-                    "item_id": entry.item_id, "title": entry.title,
+                    "item_id": entry.item_id, "user_product_id": entry.user_product_id,
+                    "detail_restricted": entry.detail_restricted, "title": entry.title,
                     "brand": entry.brand, "model": entry.model, "price": entry.price,
                     "vacuum_group": _vacuum_group(category_id, entry.title, entry.model),
                     "source_category_id": category_id,

@@ -193,3 +193,20 @@ def test_vacuum_description_separates_robots_from_other_vacuums():
     assert main._vacuum_group("MLC4337", "Aspiradora Robot con mopa", None) == "robot"
     assert main._vacuum_group("MLC4337", "Aspiradora vertical inalámbrica", None) == "other"
     assert main._vacuum_group("MLC82067", "Tablet Robot Edition", None) is None
+
+
+def test_restricted_user_product_keeps_its_public_ranking_id(monkeypatch):
+    client = configured_client(monkeypatch)
+    monkeypatch.setattr(main, "SNAPSHOT_CATEGORIES", ("MLC180993",))
+    async def fake_rate():
+        return None
+    monkeypatch.setattr(main, "_usd_clp_rate", fake_rate)
+    main._persist_snapshot("MLC180993", {"results": [{
+        "ranking": 1, "type": "USER_PRODUCT", "user_product_id": "MLCU55760760",
+        "detail_restricted": True,
+    }]})
+
+    row = client.get("/api/v1/dashboard").json()["categories"][0]["results"][0]
+
+    assert row["user_product_id"] == "MLCU55760760"
+    assert row["detail_restricted"] is True
