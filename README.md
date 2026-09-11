@@ -64,6 +64,9 @@ category/day is enforced in PostgreSQL. History is available at
 `POST /api/v1/snapshots/run?category_id=...` with the `X-Snapshot-Key` header.
 `GET /api/v1/categories/{category_id}/movements` compares the latest two days
 and reports rises, falls, new entries, unchanged products, and dropped products.
+The dashboard at `/` shows the latest stored ranking, current CLP offer when an
+official competing item is available, and its reference USD conversion. The
+exchange rate is refreshed every six hours and failure never fabricates a value.
 
 Access and refresh tokens are encrypted by the application and persisted in
 PostgreSQL. Configure `DATABASE_URL` and a stable, random

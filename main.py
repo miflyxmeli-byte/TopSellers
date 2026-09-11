@@ -20,7 +20,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI, Header, HTTPException, Path, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import (BigInteger, Boolean, DateTime, Float, ForeignKey, Integer,
-                        String, UniqueConstraint, create_engine, select, text)
+                        String, UniqueConstraint, create_engine, delete, select, text)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from sqlalchemy.pool import StaticPool
 
@@ -124,6 +124,7 @@ _store: dict = {}
 _refresh_lock = asyncio.Lock()
 REFRESH_MARGIN_SECONDS = 300
 _scheduler: AsyncIOScheduler | None = None
+_usd_rate_cache: dict = {}
 
 
 def _encrypt(value: str | None) -> str | None:
@@ -321,6 +322,18 @@ async def highlights(category_id: str = Path(pattern=r"^MLC\d+$"), enrich: bool 
                     detail = detail_response.json()
             buy_box = detail.get("buy_box_winner") or {}
             winner_item_id = buy_box.get("item_id")
+            if resource_type == "PRODUCT" and not winner_item_id:
+                offers_response = await client.get(
+                    f"{API_BASE}/products/{resource_id}/items",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if offers_response.status_code == 200:
+                    offers = offers_response.json().get("results") or []
+                    priced_offers = [offer for offer in offers if offer.get("price") is not None]
+                    if priced_offers:
+                        # Without a published buy-box winner, expose the lowest current offer.
+                        buy_box = min(priced_offers, key=lambda offer: offer["price"])
+                        winner_item_id = buy_box.get("item_id")
             item_detail: dict = {}
             item_status = None
             price_detail: dict = {}
@@ -395,12 +408,19 @@ def _persist_snapshot(category_id: str, payload: dict) -> tuple[RankingSnapshot,
             RankingSnapshot.snapshot_date == snapshot_date,
         ))
         if existing:
-            return existing, False
-        rows = payload.get("results") or []
-        snapshot = RankingSnapshot(category_id=category_id, snapshot_date=snapshot_date,
-                                   captured_at=captured_at, result_count=len(rows))
-        session.add(snapshot)
-        session.flush()
+            session.execute(delete(RankingEntry).where(RankingEntry.snapshot_id == existing.id))
+            rows = payload.get("results") or []
+            existing.captured_at = captured_at
+            existing.result_count = len(rows)
+            snapshot = existing
+            created = False
+        else:
+            rows = payload.get("results") or []
+            snapshot = RankingSnapshot(category_id=category_id, snapshot_date=snapshot_date,
+                                       captured_at=captured_at, result_count=len(rows))
+            session.add(snapshot)
+            session.flush()
+            created = True
         for row in rows:
             session.add(RankingEntry(
                 snapshot_id=snapshot.id, ranking=row.get("ranking"), resource_type=row.get("type"),
@@ -413,7 +433,7 @@ def _persist_snapshot(category_id: str, payload: dict) -> tuple[RankingSnapshot,
             ))
         session.commit()
         session.refresh(snapshot)
-        return snapshot, True
+        return snapshot, created
 
 
 async def capture_snapshot(category_id: str) -> dict:
@@ -460,10 +480,28 @@ def category_history(category_id: str = Path(pattern=r"^MLC\d+$"), limit: int = 
         return {"category_id": category_id, "count": len(result), "snapshots": result}
 
 
+async def _usd_clp_rate() -> dict | None:
+    cached_at = _usd_rate_cache.get("cached_at", 0)
+    if time.time() - cached_at < 21600 and _usd_rate_cache.get("rate"):
+        return _usd_rate_cache
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await client.get("https://mindicador.cl/api/dolar")
+        response.raise_for_status()
+        latest = response.json()["serie"][0]
+        _usd_rate_cache.update(rate=float(latest["valor"]), date=latest.get("fecha"),
+                               cached_at=time.time(), source="mindicador.cl")
+        return _usd_rate_cache
+    except Exception:
+        LOGGER.warning("USD/CLP exchange rate unavailable", exc_info=True)
+        return _usd_rate_cache or None
+
+
 @app.get("/api/v1/dashboard")
-def dashboard_data():
+async def dashboard_data():
     """Return the latest stored snapshot for each configured business category."""
     categories = []
+    fx = await _usd_clp_rate()
     with Session(engine) as session:
         for category_id in SNAPSHOT_CATEGORIES:
             snapshot = session.scalar(select(RankingSnapshot).where(
@@ -482,6 +520,8 @@ def dashboard_data():
                     "sold_quantity": entry.sold_quantity,
                     "product_sold_quantity": entry.product_sold_quantity,
                     "available_quantity": entry.available_quantity, "image": entry.image,
+                    "price_usd": round(entry.price / fx["rate"], 2)
+                    if entry.price is not None and entry.currency_id == "CLP" and fx else None,
                 } for entry in entries]
             categories.append({
                 "category_id": category_id,
@@ -491,7 +531,10 @@ def dashboard_data():
                 "result_count": snapshot.result_count if snapshot else 0,
                 "results": rows,
             })
-    return {"generated_at": datetime.now(SANTIAGO_TZ), "categories": categories}
+    return {"generated_at": datetime.now(SANTIAGO_TZ),
+            "exchange_rate": {"clp_per_usd": fx["rate"], "date": fx.get("date"),
+                              "source": fx.get("source")} if fx else None,
+            "categories": categories}
 
 
 @app.get("/api/v1/categories/{category_id}/movements")

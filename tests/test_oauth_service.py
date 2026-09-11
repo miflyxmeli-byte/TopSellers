@@ -170,9 +170,13 @@ def test_movements_reports_up_new_and_dropped_products(monkeypatch):
 def test_dashboard_returns_latest_snapshot(monkeypatch):
     client = configured_client(monkeypatch)
     monkeypatch.setattr(main, "SNAPSHOT_CATEGORIES", ("MLC1055",))
+    async def fake_rate():
+        return {"rate": 900.0, "date": "2026-09-10", "source": "test"}
+    monkeypatch.setattr(main, "_usd_clp_rate", fake_rate)
     main._persist_snapshot("MLC1055", {"results": [
         {"ranking": 1, "type": "PRODUCT", "product_id": "MLC1",
-         "title": "Teléfono", "brand": "Marca"}
+         "title": "Teléfono", "brand": "Marca", "price": 90000,
+         "currency_id": "CLP"}
     ]})
 
     payload = client.get("/api/v1/dashboard").json()
@@ -180,3 +184,5 @@ def test_dashboard_returns_latest_snapshot(monkeypatch):
     assert payload["categories"][0]["name"] == "Celulares y Smartphones"
     assert payload["categories"][0]["result_count"] == 1
     assert payload["categories"][0]["results"][0]["title"] == "Teléfono"
+    assert payload["categories"][0]["results"][0]["price_usd"] == 100.0
+    assert payload["exchange_rate"]["clp_per_usd"] == 900.0
