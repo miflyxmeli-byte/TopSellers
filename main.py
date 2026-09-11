@@ -452,6 +452,50 @@ def category_history(category_id: str = Path(pattern=r"^MLC\d+$"), limit: int = 
         return {"category_id": category_id, "count": len(result), "snapshots": result}
 
 
+@app.get("/api/v1/categories/{category_id}/movements")
+def category_movements(category_id: str = Path(pattern=r"^MLC\d+$")):
+    """Compare the latest two daily snapshots; positive movement means a rise."""
+    with Session(engine) as session:
+        snapshots = session.scalars(select(RankingSnapshot).where(
+            RankingSnapshot.category_id == category_id
+        ).order_by(RankingSnapshot.captured_at.desc()).limit(2)).all()
+        if len(snapshots) < 2:
+            return {"category_id": category_id, "comparable": False,
+                    "message": "Se necesitan al menos dos snapshots diarios"}
+
+        def entries(snapshot_id: int) -> dict[str, RankingEntry]:
+            values = session.scalars(select(RankingEntry).where(
+                RankingEntry.snapshot_id == snapshot_id
+            )).all()
+            return {(entry.product_id or entry.item_id or f"rank:{entry.ranking}"): entry
+                    for entry in values}
+
+        current, previous = snapshots[0], snapshots[1]
+        current_entries, previous_entries = entries(current.id), entries(previous.id)
+        rows = []
+        for key, entry in current_entries.items():
+            old = previous_entries.get(key)
+            rows.append({
+                "product_id": entry.product_id, "item_id": entry.item_id,
+                "title": entry.title, "brand": entry.brand,
+                "current_position": entry.ranking,
+                "previous_position": old.ranking if old else None,
+                "movement": old.ranking - entry.ranking if old else None,
+                "status": "new" if old is None else (
+                    "up" if old.ranking > entry.ranking else
+                    "down" if old.ranking < entry.ranking else "unchanged"
+                ),
+            })
+        dropped = [{"product_id": entry.product_id, "item_id": entry.item_id,
+                    "title": entry.title, "previous_position": entry.ranking,
+                    "status": "dropped"}
+                   for key, entry in previous_entries.items() if key not in current_entries]
+        return {"category_id": category_id, "comparable": True,
+                "current_date": current.snapshot_date, "previous_date": previous.snapshot_date,
+                "movements": sorted(rows, key=lambda row: row["current_position"]),
+                "dropped": dropped}
+
+
 async def _scheduled_snapshots() -> None:
     for category_id in SNAPSHOT_CATEGORIES:
         try:

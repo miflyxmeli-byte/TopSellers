@@ -62,6 +62,8 @@ With `ENABLE_SNAPSHOT_SCHEDULER=true`, the service captures the categories in
 category/day is enforced in PostgreSQL. History is available at
 `GET /api/v1/categories/{category_id}/history`; protected manual execution uses
 `POST /api/v1/snapshots/run?category_id=...` with the `X-Snapshot-Key` header.
+`GET /api/v1/categories/{category_id}/movements` compares the latest two days
+and reports rises, falls, new entries, unchanged products, and dropped products.
 
 Access and refresh tokens are encrypted by the application and persisted in
 PostgreSQL. Configure `DATABASE_URL` and a stable, random
