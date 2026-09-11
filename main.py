@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import secrets
 import time
 from datetime import datetime
@@ -137,6 +138,15 @@ def _encrypt(value: str | None) -> str | None:
 
 def _decrypt(value: str | None) -> str | None:
     return _cipher.decrypt(value.encode()).decode() if value else None
+
+
+def _vacuum_group(category_id: str, title: str | None, model: str | None) -> str | None:
+    if category_id not in {"MLC180993", "MLC4337"}:
+        return None
+    description = f"{title or ''} {model or ''}".lower()
+    if category_id == "MLC180993" or re.search(r"\brobot(?:ica|izada|izado|ic)?s?\b", description):
+        return "robot"
+    return "other"
 
 
 def _token_record() -> OAuthToken | None:
@@ -538,6 +548,9 @@ async def dashboard_data():
                     "product_id": entry.product_id,
                     "item_id": entry.item_id, "title": entry.title,
                     "brand": entry.brand, "model": entry.model, "price": entry.price,
+                    "vacuum_group": _vacuum_group(category_id, entry.title, entry.model),
+                    "source_category_id": category_id,
+                    "source_category_name": CATEGORY_LABELS.get(category_id, category_id),
                     "screen_size": entry.screen_size, "ram": entry.ram,
                     "currency_id": entry.currency_id,
                     "sold_quantity": entry.sold_quantity,
@@ -554,6 +567,18 @@ async def dashboard_data():
                 "captured_at": snapshot.captured_at if snapshot else None,
                 "result_count": snapshot.result_count if snapshot else 0,
                 "results": rows,
+            })
+        vacuum_sources = [category for category in categories
+                          if category["category_id"] in {"MLC180993", "MLC4337"}]
+        if vacuum_sources:
+            categories.insert(5, {
+                "category_id": "VACUUM_ALL", "name": "Aspiradoras · vista combinada",
+                "snapshot_date": max((source["snapshot_date"] for source in vacuum_sources
+                                      if source["snapshot_date"]), default=None),
+                "captured_at": None,
+                "previous_date": None,
+                "result_count": sum(source["result_count"] for source in vacuum_sources),
+                "results": [row for source in vacuum_sources for row in source["results"]],
             })
     return {"generated_at": datetime.now(SANTIAGO_TZ),
             "exchange_rate": {"clp_per_usd": fx["rate"], "date": fx.get("date"),

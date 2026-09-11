@@ -186,3 +186,10 @@ def test_dashboard_returns_latest_snapshot(monkeypatch):
     assert payload["categories"][0]["results"][0]["title"] == "Teléfono"
     assert payload["categories"][0]["results"][0]["price_usd"] == 100.0
     assert payload["exchange_rate"]["clp_per_usd"] == 900.0
+
+
+def test_vacuum_description_separates_robots_from_other_vacuums():
+    assert main._vacuum_group("MLC180993", "Aspiradora inteligente", None) == "robot"
+    assert main._vacuum_group("MLC4337", "Aspiradora Robot con mopa", None) == "robot"
+    assert main._vacuum_group("MLC4337", "Aspiradora vertical inalámbrica", None) == "other"
+    assert main._vacuum_group("MLC82067", "Tablet Robot Edition", None) is None
