@@ -21,7 +21,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI, Header, HTTPException, Path, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import (BigInteger, Boolean, DateTime, Float, ForeignKey, Integer,
-                        String, UniqueConstraint, create_engine, delete, select, text)
+                        String, UniqueConstraint, create_engine, delete, or_, select, text)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from sqlalchemy.pool import StaticPool
 
@@ -185,6 +185,10 @@ def _extract_suction_pa(attributes: list[dict], title: str | None) -> tuple[floa
             return parsed, "attribute"
     parsed = _pressure_to_pa(title)
     return (parsed, "title") if parsed is not None else (None, None)
+
+
+def _entry_identity(entry: RankingEntry) -> str | None:
+    return entry.product_id or entry.item_id or entry.user_product_id
 
 
 def _token_record() -> OAuthToken | None:
@@ -581,9 +585,9 @@ async def dashboard_data():
                 previous_entries = session.scalars(select(RankingEntry).where(
                     RankingEntry.snapshot_id == snapshots[1].id
                 )).all()
-                previous_positions = {(entry.product_id or entry.item_id or entry.user_product_id): entry.ranking
+                previous_positions = {_entry_identity(entry): entry.ranking
                                       for entry in previous_entries
-                                      if entry.product_id or entry.item_id or entry.user_product_id}
+                                      if _entry_identity(entry)}
             rows = []
             if snapshot:
                 entries = session.scalars(select(RankingEntry).where(
@@ -597,11 +601,12 @@ async def dashboard_data():
                         suction_pa, suction_source = _extract_suction_pa([], entry.title)
                     rows.append({
                     "ranking": entry.ranking,
-                    "previous_position": previous_positions.get(entry.product_id or entry.item_id or entry.user_product_id),
-                    "movement": (previous_positions.get(entry.product_id or entry.item_id or entry.user_product_id) - entry.ranking)
-                    if previous_positions.get(entry.product_id or entry.item_id or entry.user_product_id) is not None else None,
-                    "movement_status": "new" if previous_positions and
-                    previous_positions.get(entry.product_id or entry.item_id or entry.user_product_id) is None else "pending",
+                    "previous_position": previous_positions.get(_entry_identity(entry)),
+                    "movement": (previous_positions.get(_entry_identity(entry)) - entry.ranking)
+                    if previous_positions.get(_entry_identity(entry)) is not None else None,
+                    "movement_status": ("unknown" if entry.detail_restricted else "new")
+                    if previous_positions and previous_positions.get(_entry_identity(entry)) is None
+                    else "pending",
                     "product_id": entry.product_id,
                     "item_id": entry.item_id, "user_product_id": entry.user_product_id,
                     "detail_restricted": entry.detail_restricted, "title": entry.title,
@@ -645,6 +650,44 @@ async def dashboard_data():
             "categories": categories}
 
 
+@app.get("/api/v1/products/{resource_id}/history")
+def product_history(resource_id: str = Path(pattern=r"^MLCU?\d+$"),
+                    category_id: str | None = Query(None, pattern=r"^MLC\d+$")):
+    """Return internally captured ranking and price history for one resource."""
+    with Session(engine) as session:
+        statement = select(RankingEntry, RankingSnapshot).join(
+            RankingSnapshot, RankingEntry.snapshot_id == RankingSnapshot.id
+        ).where(or_(RankingEntry.product_id == resource_id,
+                    RankingEntry.item_id == resource_id,
+                    RankingEntry.user_product_id == resource_id))
+        if category_id:
+            statement = statement.where(RankingSnapshot.category_id == category_id)
+        records = session.execute(statement.order_by(RankingSnapshot.snapshot_date)).all()
+        if not records:
+            raise HTTPException(404, "Producto sin historial almacenado")
+        observations = [{
+            "date": snapshot.snapshot_date, "category_id": snapshot.category_id,
+            "ranking": entry.ranking, "price": entry.price,
+            "currency_id": entry.currency_id,
+        } for entry, snapshot in records]
+        latest_entry, latest_snapshot = records[-1]
+        return {
+            "resource_id": resource_id,
+            "title": latest_entry.title,
+            "brand": latest_entry.brand,
+            "model": latest_entry.model,
+            "image": latest_entry.image,
+            "detail_restricted": latest_entry.detail_restricted,
+            "category_id": latest_snapshot.category_id,
+            "category_name": CATEGORY_LABELS.get(latest_snapshot.category_id,
+                                                 latest_snapshot.category_id),
+            "days_observed": len({observation["date"] for observation in observations}),
+            "best_position": min(observation["ranking"] for observation in observations),
+            "current_position": latest_entry.ranking,
+            "observations": observations,
+        }
+
+
 @app.get("/api/v1/categories/{category_id}/movements")
 def category_movements(category_id: str = Path(pattern=r"^MLC\d+$")):
     """Compare the latest two daily snapshots; positive movement means a rise."""
@@ -660,8 +703,7 @@ def category_movements(category_id: str = Path(pattern=r"^MLC\d+$")):
             values = session.scalars(select(RankingEntry).where(
                 RankingEntry.snapshot_id == snapshot_id
             )).all()
-            return {(entry.product_id or entry.item_id or f"rank:{entry.ranking}"): entry
-                    for entry in values}
+            return {_entry_identity(entry): entry for entry in values if _entry_identity(entry)}
 
         current, previous = snapshots[0], snapshots[1]
         current_entries, previous_entries = entries(current.id), entries(previous.id)
@@ -670,11 +712,12 @@ def category_movements(category_id: str = Path(pattern=r"^MLC\d+$")):
             old = previous_entries.get(key)
             rows.append({
                 "product_id": entry.product_id, "item_id": entry.item_id,
+                "user_product_id": entry.user_product_id,
                 "title": entry.title, "brand": entry.brand,
                 "current_position": entry.ranking,
                 "previous_position": old.ranking if old else None,
                 "movement": old.ranking - entry.ranking if old else None,
-                "status": "new" if old is None else (
+                "status": ("unknown" if entry.detail_restricted else "new") if old is None else (
                     "up" if old.ranking > entry.ranking else
                     "down" if old.ranking < entry.ranking else "unchanged"
                 ),

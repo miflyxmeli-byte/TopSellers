@@ -224,3 +224,35 @@ def test_suction_pressure_is_normalized_to_pascals():
     }], "Modelo sin presión en el título")
     assert value == 6000
     assert source == "attribute"
+
+
+def test_product_history_summarizes_positions(monkeypatch):
+    client = configured_client(monkeypatch)
+    now = datetime.now(main.SANTIAGO_TZ)
+    with main.Session(main.engine) as session:
+        first = main.RankingSnapshot(category_id="MLC1055", snapshot_date="2026-09-10",
+                                     captured_at=now - timedelta(days=1), result_count=1)
+        second = main.RankingSnapshot(category_id="MLC1055", snapshot_date="2026-09-11",
+                                      captured_at=now, result_count=1)
+        session.add_all([first, second])
+        session.flush()
+        session.add_all([
+            main.RankingEntry(snapshot_id=first.id, ranking=5, resource_type="PRODUCT",
+                              product_id="MLC123", title="Producto"),
+            main.RankingEntry(snapshot_id=second.id, ranking=3, resource_type="PRODUCT",
+                              product_id="MLC123", title="Producto", price=99990,
+                              currency_id="CLP"),
+        ])
+        session.commit()
+
+    payload = client.get("/api/v1/products/MLC123/history?category_id=MLC1055").json()
+
+    assert payload["days_observed"] == 2
+    assert payload["best_position"] == 3
+    assert payload["current_position"] == 3
+    assert [row["ranking"] for row in payload["observations"]] == [5, 3]
+
+
+def test_product_history_returns_404_for_unknown_resource(monkeypatch):
+    client = configured_client(monkeypatch)
+    assert client.get("/api/v1/products/MLC999/history").status_code == 404
