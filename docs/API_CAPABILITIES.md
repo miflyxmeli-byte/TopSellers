@@ -66,6 +66,29 @@ this MLC snapshot.
 
 The official API documents current top-20 highlights and lookups for the current position of a product or item. It does not document a date parameter or snapshot endpoint equivalent to “Top 10 on 2026-01-01.” Historical bestseller rankings must be generated internally through periodic snapshots.
 
+## Internal snapshot coverage
+
+Daily capture runs at 06:00 America/Santiago. The initial portfolio was chosen
+from technology and appliance leaf categories with meaningful listing volume,
+then retained only when a live highlights call returned `200` and at least one
+ranked result. It is an internal coverage criterion, not Mercado Libre's
+undisclosed bestseller formula.
+
+| Category ID | Category | Live ranking size at activation |
+|---|---|---:|
+| `MLC1055` | Celulares y Smartphones | 10 |
+| `MLC3697` | Audífonos | 20 |
+| `MLC172568` | Parlantes Portátiles | 18 |
+| `MLC1714` | Mouses | 18 |
+| `MLC418448` | Teclados Físicos | 16 |
+| `MLC1672` | Discos Duros y SSDs | 20 |
+| `MLC4337` | Aspiradoras | 20 |
+| `MLC181012` | Purificadores de Agua | 20 |
+| `MLC4340` | Cafeteras | 20 |
+
+`MLC457530` (Ventiladores Portátiles) was tested and excluded because highlights
+returned `404`. The first nine category snapshots were stored on 2026-09-10.
+
 ## Technical conclusion
 
 The proposed application is feasible for current category bestsellers. The complete MLC category tree is obtainable and the official highlights resource defines a real bestseller ranking. OAuth application setup and token refresh are mandatory for the central workflow. Once authorized, enrichment must treat `ITEM`, `PRODUCT`, and `USER_PRODUCT` separately and preserve missing values. Retrospective history cannot be reconstructed officially and must begin accumulating after the application starts taking scheduled snapshots.
