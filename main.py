@@ -71,6 +71,15 @@ class OAuthToken(Base):
     expires_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 
+class ExchangeRate(Base):
+    __tablename__ = "exchange_rates"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    clp_per_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    observed_at: Mapped[str | None] = mapped_column(String(64))
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    fetched_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
 class RankingSnapshot(Base):
     __tablename__ = "ranking_snapshots"
     __table_args__ = (UniqueConstraint("category_id", "snapshot_date",
@@ -556,17 +565,49 @@ async def _usd_clp_rate() -> dict | None:
     cached_at = _usd_rate_cache.get("cached_at", 0)
     if time.time() - cached_at < 21600 and _usd_rate_cache.get("rate"):
         return _usd_rate_cache
-    try:
-        async with httpx.AsyncClient(timeout=8) as client:
+    async def mindicador() -> dict:
+        async with httpx.AsyncClient(timeout=5) as client:
             response = await client.get("https://mindicador.cl/api/dolar")
         response.raise_for_status()
         latest = response.json()["serie"][0]
-        _usd_rate_cache.update(rate=float(latest["valor"]), date=latest.get("fecha"),
-                               cached_at=time.time(), source="mindicador.cl")
+        return {"rate": float(latest["valor"]), "date": latest.get("fecha"),
+                "source": "mindicador.cl"}
+
+    async def exchange_rate_api() -> dict:
+        async with httpx.AsyncClient(timeout=7) as client:
+            response = await client.get("https://open.er-api.com/v6/latest/USD")
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("result") != "success" or not payload.get("rates", {}).get("CLP"):
+            raise ValueError("ExchangeRate-API did not return CLP")
+        return {"rate": float(payload["rates"]["CLP"]),
+                "date": payload.get("time_last_update_utc"),
+                "source": "open.er-api.com"}
+
+    results = await asyncio.gather(mindicador(), exchange_rate_api(), return_exceptions=True)
+    current = next((result for result in results if isinstance(result, dict)), None)
+    if current:
+        current.update(cached_at=time.time(), stale=False)
+        _usd_rate_cache.update(current)
+        with Session(engine) as session:
+            record = session.get(ExchangeRate, 1) or ExchangeRate(
+                id=1, clp_per_usd=current["rate"], source=current["source"],
+                fetched_at=current["cached_at"])
+            record.clp_per_usd = current["rate"]
+            record.observed_at = current.get("date")
+            record.source = current["source"]
+            record.fetched_at = current["cached_at"]
+            session.add(record)
+            session.commit()
         return _usd_rate_cache
-    except Exception:
-        LOGGER.warning("USD/CLP exchange rate unavailable", exc_info=True)
-        return _usd_rate_cache or None
+
+    LOGGER.warning("All USD/CLP exchange-rate sources unavailable")
+    with Session(engine) as session:
+        stored = session.get(ExchangeRate, 1)
+        if stored:
+            _usd_rate_cache.update(rate=stored.clp_per_usd, date=stored.observed_at,
+                                   source=stored.source, cached_at=stored.fetched_at, stale=True)
+    return _usd_rate_cache or None
 
 
 @app.get("/api/v1/dashboard")
@@ -646,7 +687,8 @@ async def dashboard_data():
             })
     return {"generated_at": datetime.now(SANTIAGO_TZ),
             "exchange_rate": {"clp_per_usd": fx["rate"], "date": fx.get("date"),
-                              "source": fx.get("source")} if fx else None,
+                              "source": fx.get("source"), "stale": fx.get("stale", False)}
+            if fx else None,
             "categories": categories}
 
 

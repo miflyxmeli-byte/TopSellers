@@ -18,6 +18,7 @@ def configured_client(monkeypatch):
         session.execute(delete(main.RankingEntry))
         session.execute(delete(main.RankingSnapshot))
         session.execute(delete(main.OAuthToken))
+        session.execute(delete(main.ExchangeRate))
         session.commit()
     return TestClient(main.app)
 
