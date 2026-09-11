@@ -589,7 +589,13 @@ async def dashboard_data():
                 entries = session.scalars(select(RankingEntry).where(
                     RankingEntry.snapshot_id == snapshot.id
                 ).order_by(RankingEntry.ranking)).all()
-                rows = [{
+                rows = []
+                for entry in entries:
+                    suction_pa = entry.suction_pa
+                    suction_source = entry.suction_source
+                    if suction_pa is None:
+                        suction_pa, suction_source = _extract_suction_pa([], entry.title)
+                    rows.append({
                     "ranking": entry.ranking,
                     "previous_position": previous_positions.get(entry.product_id or entry.item_id or entry.user_product_id),
                     "movement": (previous_positions.get(entry.product_id or entry.item_id or entry.user_product_id) - entry.ranking)
@@ -604,14 +610,14 @@ async def dashboard_data():
                     "source_category_id": category_id,
                     "source_category_name": CATEGORY_LABELS.get(category_id, category_id),
                     "screen_size": entry.screen_size, "ram": entry.ram,
-                    "suction_pa": entry.suction_pa, "suction_source": entry.suction_source,
+                    "suction_pa": suction_pa, "suction_source": suction_source,
                     "currency_id": entry.currency_id,
                     "sold_quantity": entry.sold_quantity,
                     "product_sold_quantity": entry.product_sold_quantity,
                     "available_quantity": entry.available_quantity, "image": entry.image,
                     "price_usd": round(entry.price / fx["rate"], 2)
                     if entry.price is not None and entry.currency_id == "CLP" and fx else None,
-                } for entry in entries]
+                    })
             categories.append({
                 "category_id": category_id,
                 "name": CATEGORY_LABELS.get(category_id, category_id),
