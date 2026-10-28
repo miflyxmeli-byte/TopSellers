@@ -396,21 +396,27 @@ async def me():
     return {key: data.get(key) for key in ("id", "nickname", "site_id", "country_id")}
 
 
-@app.get("/api/v1/application")
-async def application_details():
-    """Expose only non-secret application metadata reported by Mercado Libre."""
+async def _application_access_token() -> str:
     async with httpx.AsyncClient(timeout=20) as client:
-        credentials_response = await client.post(TOKEN_URL, data={
+        response = await client.post(TOKEN_URL, data={
             "grant_type": "client_credentials",
             "client_id": CLIENT_ID,
             "client_secret": CLIENT_SECRET,
         })
-        if credentials_response.status_code != 200:
-            raise HTTPException(credentials_response.status_code,
-                                "Mercado Libre rechazó Client Credentials")
-        app_token = credentials_response.json().get("access_token")
-        if not app_token:
-            raise HTTPException(502, "Mercado Libre no devolvió un token de aplicación")
+    if response.status_code != 200:
+        raise HTTPException(response.status_code,
+                            "Mercado Libre rechazó Client Credentials")
+    token = response.json().get("access_token")
+    if not token:
+        raise HTTPException(502, "Mercado Libre no devolvió un token de aplicación")
+    return token
+
+
+@app.get("/api/v1/application")
+async def application_details():
+    """Expose only non-secret application metadata reported by Mercado Libre."""
+    app_token = await _application_access_token()
+    async with httpx.AsyncClient(timeout=20) as client:
         response = await client.get(
             f"{API_BASE}/applications/{CLIENT_ID}",
             headers={"Authorization": f"Bearer {app_token}"},
@@ -590,7 +596,7 @@ async def trends(category_id: str | None = None):
     """Return Mercado Libre's official weekly Chilean search trends."""
     if category_id is not None and not re.fullmatch(r"MLC\d+", category_id):
         raise HTTPException(422, "category_id inválido")
-    token = await _access_token()
+    token = await _application_access_token()
     suffix = f"/{category_id}" if category_id else ""
     async with httpx.AsyncClient(timeout=20) as client:
         response = await client.get(
