@@ -426,9 +426,25 @@ async def application_details():
             "code": upstream.get("code"),
         })
     data = response.json()
-    return {key: data.get(key) for key in (
+    result = {key: data.get(key) for key in (
         "id", "name", "site_id", "status", "scopes", "businesses",
     )}
+    async with httpx.AsyncClient(timeout=20) as client:
+        probe = await client.get(
+            f"{API_BASE}/highlights/MLC/category/MLC82067",
+            headers={"Authorization": f"Bearer {app_token}"},
+        )
+    try:
+        probe_data = probe.json()
+    except ValueError:
+        probe_data = {}
+    result["highlights_probe"] = {
+        "status": probe.status_code,
+        "code": probe_data.get("code"),
+        "message": probe_data.get("message") or probe_data.get("error"),
+        "results": len(probe_data.get("content", [])),
+    }
+    return result
 
 
 @app.get("/api/v1/highlights/{category_id}")
