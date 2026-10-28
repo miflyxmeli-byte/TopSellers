@@ -406,7 +406,22 @@ async def highlights(category_id: str = Path(pattern=r"^MLC\d+$"), enrich: bool 
             headers={"Authorization": f"Bearer {token}"},
         )
     if response.status_code != 200:
-        raise HTTPException(response.status_code, "Mercado Libre rechazó la consulta de highlights")
+        # Preserve Mercado Libre's diagnostic without ever exposing request
+        # headers or the bearer token.  Their 403 response usually identifies
+        # the missing application permission or account restriction.
+        try:
+            upstream = response.json()
+        except ValueError:
+            upstream = {}
+        diagnostic = " · ".join(
+            str(upstream.get(key))
+            for key in ("error", "message", "code", "cause")
+            if upstream.get(key) not in (None, "", [])
+        )
+        detail = "Mercado Libre rechazó la consulta de highlights"
+        if diagnostic:
+            detail = f"{detail}: {diagnostic[:500]}"
+        raise HTTPException(response.status_code, detail)
     payload = response.json()
     if not enrich:
         return payload
