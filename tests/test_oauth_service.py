@@ -41,7 +41,8 @@ def test_root_serves_dashboard(monkeypatch):
     response = client.get("/")
     assert response.status_code == 200
     assert "MiFly Market Intelligence" in response.text
-    assert "Top Sellers" in response.text
+    assert "Radar de" in response.text
+    assert "Tendencias" in response.text
 
 
 def test_login_redirect_contains_state_without_secret(monkeypatch):

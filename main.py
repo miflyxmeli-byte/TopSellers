@@ -8,7 +8,7 @@ import os
 import re
 import secrets
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path as FilePath
 from typing import Optional
 from urllib.parse import urlencode
@@ -134,6 +134,31 @@ class RankingEntry(Base):
     available_quantity: Mapped[int | None] = mapped_column(Integer)
     image: Mapped[str | None] = mapped_column(String)
     buy_box_winner_available: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class TrendSnapshot(Base):
+    __tablename__ = "trend_snapshots"
+    __table_args__ = (UniqueConstraint("site_id", "category_key", "snapshot_date",
+                                      name="uq_trend_site_category_date"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    site_id: Mapped[str] = mapped_column(String(8), index=True)
+    category_key: Mapped[str] = mapped_column(String(32), default="ALL", index=True)
+    snapshot_date: Mapped[str] = mapped_column(String(10), index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    result_count: Mapped[int] = mapped_column(Integer)
+
+
+class TrendEntry(Base):
+    __tablename__ = "trend_entries"
+    __table_args__ = (UniqueConstraint("snapshot_id", "position",
+                                      name="uq_trend_snapshot_position"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_id: Mapped[int] = mapped_column(ForeignKey("trend_snapshots.id", ondelete="CASCADE"),
+                                             index=True)
+    position: Mapped[int] = mapped_column(Integer)
+    segment: Mapped[str] = mapped_column(String(32))
+    keyword: Mapped[str] = mapped_column(String)
+    url: Mapped[str | None] = mapped_column(String)
 
 
 engine_options = {"pool_pre_ping": True}
@@ -302,7 +327,7 @@ async def _access_token() -> str:
 
 @app.get("/", response_class=HTMLResponse)
 def root():
-    return HTMLResponse((PROJECT_DIR / "static" / "dashboard.html").read_text(encoding="utf-8"))
+    return HTMLResponse((PROJECT_DIR / "static" / "trends.html").read_text(encoding="utf-8"))
 
 
 @app.get("/health")
@@ -613,7 +638,94 @@ async def trends(category_id: str | None = None):
             or "Mercado Libre rechazó la consulta de tendencias",
             "code": upstream.get("code"),
         })
-    return response.json()
+    payload = response.json()
+    _persist_trends("MLC", category_id or "ALL", payload)
+    return payload
+
+
+def _trend_segment(position: int) -> str:
+    if position <= 10:
+        return "Mayor crecimiento"
+    if position <= 30:
+        return "Más buscadas"
+    return "Tendencias populares"
+
+
+def _regulatory_review(keyword: str) -> list[dict]:
+    """Flag possible Chilean reviews; an exact SKU assessment is always required."""
+    value = keyword.lower()
+    reviews: list[dict] = []
+    rules = (
+        ("SEC", ("aspirador", "secador", "alisador", "hervidor", "freidora", "plancha",
+                 "calefactor", "estufa", "horno", "licuadora", "batidora", "lavadora"),
+         "Puede ser un producto eléctrico sujeto a certificación y Sello SEC."),
+        ("SUBTEL", ("bluetooth", "wifi", "wi-fi", "gps", "smartwatch", "smart watch",
+                    "drone", "cámara seguridad", "camara seguridad", "radio", "4g", "5g",
+                    "tablet con chip", "localizador"),
+         "Puede utilizar espectro radioeléctrico y requerir certificación SUBTEL."),
+        ("ISP", ("cosmético", "cosmetico", "crema", "serum", "sérum", "maquillaje",
+                 "perfume", "shilajit", "suplemento", "vitamina", "proteína", "proteina"),
+         "Puede estar sometido a autorización o control sanitario del ISP."),
+    )
+    for authority, terms, reason in rules:
+        if any(term in value for term in terms):
+            reviews.append({"authority": authority, "status": "Revisión requerida", "reason": reason})
+    return reviews or [{"authority": "GENERAL", "status": "Por confirmar",
+                        "reason": "Revisar el modelo, composición y ficha técnica exactos antes de importar."}]
+
+
+def _persist_trends(site_id: str, category_key: str, payload: list[dict]) -> TrendSnapshot:
+    captured_at = datetime.now(SANTIAGO_TZ)
+    snapshot_date = captured_at.date().isoformat()
+    with Session(engine) as session:
+        snapshot = session.scalar(select(TrendSnapshot).where(
+            TrendSnapshot.site_id == site_id,
+            TrendSnapshot.category_key == category_key,
+            TrendSnapshot.snapshot_date == snapshot_date,
+        ))
+        if snapshot:
+            session.execute(delete(TrendEntry).where(TrendEntry.snapshot_id == snapshot.id))
+            snapshot.captured_at = captured_at
+            snapshot.result_count = len(payload)
+        else:
+            snapshot = TrendSnapshot(site_id=site_id, category_key=category_key,
+                                     snapshot_date=snapshot_date, captured_at=captured_at,
+                                     result_count=len(payload))
+            session.add(snapshot)
+            session.flush()
+        for position, row in enumerate(payload, start=1):
+            session.add(TrendEntry(snapshot_id=snapshot.id, position=position,
+                                   segment=_trend_segment(position),
+                                   keyword=row.get("keyword") or "-", url=row.get("url")))
+        session.commit()
+        session.refresh(snapshot)
+        return snapshot
+
+
+@app.get("/api/v1/trends-preview")
+async def trends_preview(days: int = Query(default=60, ge=1, le=365),
+                         category_id: str | None = Query(default=None)):
+    if category_id is not None and not re.fullmatch(r"MLC\d+", category_id):
+        raise HTTPException(422, "category_id inválido")
+    current = await trends(category_id)
+    category_key = category_id or "ALL"
+    since = (datetime.now(SANTIAGO_TZ).date() - timedelta(days=days - 1)).isoformat()
+    with Session(engine) as session:
+        snapshots = session.scalars(select(TrendSnapshot).where(
+            TrendSnapshot.site_id == "MLC",
+            TrendSnapshot.category_key == category_key,
+            TrendSnapshot.snapshot_date >= since,
+        ).order_by(TrendSnapshot.snapshot_date.desc())).all()
+        dates = [snapshot.snapshot_date for snapshot in snapshots]
+    rows = [{"position": position, "segment": _trend_segment(position),
+             "keyword": row.get("keyword"), "url": row.get("url"),
+             "regulatory_review": _regulatory_review(row.get("keyword") or "")}
+            for position, row in enumerate(current, start=1)]
+    return {"site_id": "MLC", "category_id": category_id, "requested_days": days,
+            "available_from": min(dates) if dates else None,
+            "snapshot_dates": dates, "historical_days_available": len(dates),
+            "historical_limit": "Mercado Libre no ofrece tendencias retrospectivas; el historial se acumula internamente.",
+            "count": len(rows), "results": rows}
 
 
 def _persist_snapshot(category_id: str, payload: dict) -> tuple[RankingSnapshot, bool]:
@@ -961,6 +1073,15 @@ async def _scheduled_token_maintenance() -> None:
             session.commit()
 
 
+async def _scheduled_trends() -> None:
+    try:
+        await trends(None)
+        for category_id in CATEGORY_LABELS:
+            await trends(category_id)
+    except Exception:
+        LOGGER.exception("Scheduled trends snapshot failed")
+
+
 @app.on_event("startup")
 async def start_snapshot_scheduler() -> None:
     global _scheduler
@@ -969,6 +1090,9 @@ async def start_snapshot_scheduler() -> None:
     _scheduler = AsyncIOScheduler(timezone=SANTIAGO_TZ)
     _scheduler.add_job(_scheduled_snapshots, CronTrigger(hour=6, minute=0, timezone=SANTIAGO_TZ),
                        id="daily_mlc_snapshots", replace_existing=True, max_instances=1,
+                       coalesce=True, misfire_grace_time=3600)
+    _scheduler.add_job(_scheduled_trends, CronTrigger(hour=6, minute=20, timezone=SANTIAGO_TZ),
+                       id="daily_mlc_trends", replace_existing=True, max_instances=1,
                        coalesce=True, misfire_grace_time=3600)
     _scheduler.add_job(_scheduled_token_maintenance,
                        CronTrigger(hour="*/4", minute=15, timezone=SANTIAGO_TZ),
