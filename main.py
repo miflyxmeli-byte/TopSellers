@@ -396,6 +396,31 @@ async def me():
     return {key: data.get(key) for key in ("id", "nickname", "site_id", "country_id")}
 
 
+@app.get("/api/v1/application")
+async def application_details():
+    """Expose only non-secret application metadata reported by Mercado Libre."""
+    token = await _access_token()
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.get(
+            f"{API_BASE}/applications/{CLIENT_ID}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    if response.status_code != 200:
+        try:
+            upstream = response.json()
+        except ValueError:
+            upstream = {}
+        raise HTTPException(response.status_code, {
+            "message": upstream.get("message") or upstream.get("error")
+            or "Mercado Libre rechazó la consulta de la aplicación",
+            "code": upstream.get("code"),
+        })
+    data = response.json()
+    return {key: data.get(key) for key in (
+        "id", "name", "site_id", "status", "scopes", "businesses",
+    )}
+
+
 @app.get("/api/v1/highlights/{category_id}")
 async def highlights(category_id: str = Path(pattern=r"^MLC\d+$"), enrich: bool = False):
     """Return Mercado Libre's official current bestseller ranking for an MLC leaf category."""
