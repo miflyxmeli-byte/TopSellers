@@ -399,11 +399,21 @@ async def me():
 @app.get("/api/v1/application")
 async def application_details():
     """Expose only non-secret application metadata reported by Mercado Libre."""
-    token = await _access_token()
     async with httpx.AsyncClient(timeout=20) as client:
+        credentials_response = await client.post(TOKEN_URL, data={
+            "grant_type": "client_credentials",
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+        })
+        if credentials_response.status_code != 200:
+            raise HTTPException(credentials_response.status_code,
+                                "Mercado Libre rechazó Client Credentials")
+        app_token = credentials_response.json().get("access_token")
+        if not app_token:
+            raise HTTPException(502, "Mercado Libre no devolvió un token de aplicación")
         response = await client.get(
             f"{API_BASE}/applications/{CLIENT_ID}",
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {app_token}"},
         )
     if response.status_code != 200:
         try:
