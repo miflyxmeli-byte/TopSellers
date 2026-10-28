@@ -45,6 +45,17 @@ def test_root_serves_dashboard(monkeypatch):
     assert "Tendencias" in response.text
 
 
+def test_sources_explain_access_levels(monkeypatch):
+    client = configured_client(monkeypatch)
+    response = client.get("/api/v1/sources")
+    assert response.status_code == 200
+    sources = {source["id"]: source for source in response.json()["sources"]}
+    assert sources["mercadolibre"]["status"] == "active"
+    assert sources["google"]["status"] == "manual"
+    assert sources["owid"]["status"] == "open_api"
+    assert sources["statista"]["status"] == "licensed"
+
+
 def test_login_redirect_contains_state_without_secret(monkeypatch):
     client = configured_client(monkeypatch)
     response = client.get("/oauth/login", follow_redirects=False)

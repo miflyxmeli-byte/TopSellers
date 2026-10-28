@@ -52,6 +52,42 @@ CATEGORY_LABELS = {
     "MLC4597": "Secadores de pelo",
     "MLC178457": "Alisadores de pelo",
 }
+SOURCE_CATALOG = [
+    {"id": "mercadolibre", "name": "Mercado Libre Trends", "status": "active",
+     "access": "API oficial", "role": "Tendencias semanales de búsqueda por país y categoría.",
+     "coverage": "Chile y 6 mercados latinoamericanos",
+     "url": "https://developers.mercadolibre.cl/es_cl/tendencias"},
+    {"id": "google", "name": "Google Trends", "status": "manual",
+     "access": "Exploración directa · API oficial en Alpha restringida",
+     "role": "Interés relativo, estacionalidad y distribución geográfica.",
+     "coverage": "Chile y Latinoamérica",
+     "url": "https://trends.google.com/trends/explore?geo=CL"},
+    {"id": "pew", "name": "Pew Research Center", "status": "context",
+     "access": "Informes y datasets descargables",
+     "role": "Hábitos, demografía y adopción tecnológica; no mide demanda de SKUs.",
+     "coverage": "Principalmente Estados Unidos y estudios globales",
+     "url": "https://www.pewresearch.org/datasets/"},
+    {"id": "owid", "name": "Our World in Data", "status": "open_api",
+     "access": "API y CSV abiertos según licencia del dataset",
+     "role": "Contexto macro de población, conectividad, ingresos y tecnología.",
+     "coverage": "Global",
+     "url": "https://ourworldindata.org/"},
+    {"id": "statista", "name": "Statista", "status": "licensed",
+     "access": "Resúmenes públicos · detalle y automatización sujetos a licencia",
+     "role": "Tamaño, pronósticos y estructura de mercados sectoriales.",
+     "coverage": "Global",
+     "url": "https://www.statista.com/markets/"},
+    {"id": "institutional", "name": "CEPAL y fuentes institucionales", "status": "open_api",
+     "access": "Portales y datasets oficiales con formatos variables",
+     "role": "Consumo, comercio, demografía y contexto económico regional.",
+     "coverage": "Latinoamérica y países individuales",
+     "url": "https://statistics.cepal.org/portal/cepalstat/"},
+    {"id": "similarweb", "name": "Similarweb", "status": "licensed",
+     "access": "Vista gratuita limitada · API y detalle sujetos a licencia",
+     "role": "Tráfico y canales digitales de marketplaces y competidores; no ventas por producto.",
+     "coverage": "Global",
+     "url": "https://www.similarweb.com/"},
+]
 LOGGER = logging.getLogger("topsellers")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
@@ -328,6 +364,12 @@ async def _access_token() -> str:
 @app.get("/", response_class=HTMLResponse)
 def root():
     return HTMLResponse((PROJECT_DIR / "static" / "trends.html").read_text(encoding="utf-8"))
+
+
+@app.get("/api/v1/sources")
+def sources():
+    return {"count": len(SOURCE_CATALOG), "sources": SOURCE_CATALOG,
+            "methodology": "Las fuentes se muestran por separado hasta que sus métricas sean comparables y su licencia permita automatización."}
 
 
 @app.get("/health")
@@ -719,6 +761,8 @@ async def trends_preview(days: int = Query(default=60, ge=1, le=365),
         dates = [snapshot.snapshot_date for snapshot in snapshots]
     rows = [{"position": position, "segment": _trend_segment(position),
              "keyword": row.get("keyword"), "url": row.get("url"),
+             "google_trends_url": "https://trends.google.com/trends/explore?" + urlencode({
+                 "date": "today 3-m", "geo": "CL", "q": row.get("keyword") or ""}),
              "regulatory_review": _regulatory_review(row.get("keyword") or "")}
             for position, row in enumerate(current, start=1)]
     return {"site_id": "MLC", "category_id": category_id, "requested_days": days,
