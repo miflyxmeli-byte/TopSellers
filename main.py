@@ -584,6 +584,32 @@ async def highlights(category_id: str = Path(pattern=r"^MLC\d+$"), enrich: bool 
     return {"query_data": payload.get("query_data"), "count": len(rows), "results": rows}
 
 
+@app.get("/api/v1/trends")
+@app.get("/api/v1/trends/{category_id}")
+async def trends(category_id: str | None = None):
+    """Return Mercado Libre's official weekly Chilean search trends."""
+    if category_id is not None and not re.fullmatch(r"MLC\d+", category_id):
+        raise HTTPException(422, "category_id inválido")
+    token = await _access_token()
+    suffix = f"/{category_id}" if category_id else ""
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.get(
+            f"{API_BASE}/trends/MLC{suffix}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    if response.status_code != 200:
+        try:
+            upstream = response.json()
+        except ValueError:
+            upstream = {}
+        raise HTTPException(response.status_code, {
+            "message": upstream.get("message") or upstream.get("error")
+            or "Mercado Libre rechazó la consulta de tendencias",
+            "code": upstream.get("code"),
+        })
+    return response.json()
+
+
 def _persist_snapshot(category_id: str, payload: dict) -> tuple[RankingSnapshot, bool]:
     captured_at = datetime.now(SANTIAGO_TZ)
     snapshot_date = captured_at.date().isoformat()
