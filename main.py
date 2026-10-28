@@ -81,6 +81,23 @@ class ExchangeRate(Base):
     fetched_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 
+class OAuthHandshake(Base):
+    __tablename__ = "oauth_handshakes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    state: Mapped[str] = mapped_column(String(128), nullable=False)
+    code_verifier: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class SchedulerStatus(Base):
+    __tablename__ = "scheduler_status"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String)
+    categories_captured: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class RankingSnapshot(Base):
     __tablename__ = "ranking_snapshots"
     __table_args__ = (UniqueConstraint("category_id", "snapshot_date",
@@ -206,6 +223,17 @@ def _token_record() -> OAuthToken | None:
         return session.scalar(select(OAuthToken).where(OAuthToken.id == 1))
 
 
+def _scheduler_status_payload() -> dict | None:
+    with Session(engine) as session:
+        record = session.get(SchedulerStatus, 1)
+        if not record:
+            return None
+        return {"last_attempt_at": record.last_attempt_at,
+                "last_success_at": record.last_success_at,
+                "last_error": record.last_error,
+                "categories_captured": record.categories_captured}
+
+
 def _save_tokens(data: dict, previous_refresh: str | None = None) -> None:
     with Session(engine) as session:
         record = session.get(OAuthToken, 1) or OAuthToken(id=1, access_token="", expires_at=0)
@@ -281,7 +309,10 @@ def root():
 def health():
     return {"status": "ok", "config_complete": bool(CLIENT_ID and CLIENT_SECRET and REDIRECT_URI),
             "persistent_storage": not DATABASE_URL.startswith("sqlite"),
-            "token_valid": _valid_token() is not None}
+            "token_valid": _valid_token() is not None,
+            "authorization_present": _token_record() is not None,
+            "scheduler_enabled": ENABLE_SNAPSHOT_SCHEDULER,
+            "scheduler": _scheduler_status_payload()}
 
 
 @app.get("/oauth/login")
@@ -294,6 +325,11 @@ def oauth_login():
     ).rstrip(b"=").decode("ascii")
     _store["state"] = state
     _store["code_verifier"] = code_verifier
+    with Session(engine) as session:
+        session.execute(delete(OAuthHandshake))
+        session.add(OAuthHandshake(id=1, state=state, code_verifier=_encrypt(code_verifier) or "",
+                                   expires_at=time.time() + 900))
+        session.commit()
     params = {"response_type": "code", "client_id": CLIENT_ID,
               "redirect_uri": REDIRECT_URI, "state": state,
               "code_challenge": code_challenge, "code_challenge_method": "S256"}
@@ -309,11 +345,18 @@ async def oauth_callback(code: Optional[str] = Query(None), state: Optional[str]
         raise HTTPException(400, f"Mercado Libre: {error} - {error_description or ''}")
     if not code:
         raise HTTPException(400, "Falta el parámetro 'code'")
-    expected = _store.get("state")
+    with Session(engine) as session:
+        handshake = session.get(OAuthHandshake, 1)
+        expected = handshake.state if handshake and handshake.expires_at > time.time() else None
+        encrypted_verifier = handshake.code_verifier if expected else None
+        if handshake:
+            session.delete(handshake)
+            session.commit()
     if not expected or not state or not secrets.compare_digest(state, expected):
         raise HTTPException(400, "Parámetro 'state' inválido o expirado")
     _store.pop("state", None)
-    code_verifier = _store.pop("code_verifier", None)
+    code_verifier = _decrypt(encrypted_verifier) if encrypted_verifier else None
+    _store.pop("code_verifier", None)
     if not code_verifier:
         raise HTTPException(400, "Verificador PKCE ausente o expirado; reinicia /oauth/login")
     payload = {"grant_type": "authorization_code", "client_id": CLIENT_ID,
@@ -329,6 +372,7 @@ async def oauth_callback(code: Optional[str] = Query(None), state: Optional[str]
     if not data.get("access_token"):
         raise HTTPException(502, "Mercado Libre no devolvió un access token")
     _save_tokens(data)
+    asyncio.create_task(_scheduled_snapshots())
     return HTMLResponse("<html><body><h2>Autorización completada</h2>"
                         f"<p>Usuario Mercado Libre: <b>{data.get('user_id')}</b></p>"
                         "<p>Ya puedes cerrar esta ventana.</p></body></html>")
@@ -784,11 +828,39 @@ def category_movements(category_id: str = Path(pattern=r"^MLC\d+$")):
 
 
 async def _scheduled_snapshots() -> None:
+    attempted_at = datetime.now(SANTIAGO_TZ)
+    errors = []
+    captured = 0
     for category_id in SNAPSHOT_CATEGORIES:
         try:
             await capture_snapshot(category_id)
-        except Exception:
+            captured += 1
+        except Exception as exc:
+            errors.append(f"{category_id}: {exc}")
             LOGGER.exception("Scheduled snapshot failed for %s", category_id)
+            if isinstance(exc, HTTPException) and exc.status_code == 401:
+                break
+    with Session(engine) as session:
+        status = session.get(SchedulerStatus, 1) or SchedulerStatus(id=1)
+        status.last_attempt_at = attempted_at
+        status.categories_captured = captured
+        status.last_error = " | ".join(errors)[:2000] if errors else None
+        if not errors and captured == len(SNAPSHOT_CATEGORIES):
+            status.last_success_at = datetime.now(SANTIAGO_TZ)
+        session.add(status)
+        session.commit()
+
+
+async def _scheduled_token_maintenance() -> None:
+    try:
+        await _refresh_persisted_token(force=False)
+    except Exception as exc:
+        LOGGER.exception("Scheduled OAuth token maintenance failed")
+        with Session(engine) as session:
+            status = session.get(SchedulerStatus, 1) or SchedulerStatus(id=1)
+            status.last_error = f"OAuth maintenance: {exc}"[:2000]
+            session.add(status)
+            session.commit()
 
 
 @app.on_event("startup")
@@ -799,6 +871,10 @@ async def start_snapshot_scheduler() -> None:
     _scheduler = AsyncIOScheduler(timezone=SANTIAGO_TZ)
     _scheduler.add_job(_scheduled_snapshots, CronTrigger(hour=6, minute=0, timezone=SANTIAGO_TZ),
                        id="daily_mlc_snapshots", replace_existing=True, max_instances=1,
+                       coalesce=True, misfire_grace_time=3600)
+    _scheduler.add_job(_scheduled_token_maintenance,
+                       CronTrigger(hour="*/4", minute=15, timezone=SANTIAGO_TZ),
+                       id="oauth_token_maintenance", replace_existing=True, max_instances=1,
                        coalesce=True, misfire_grace_time=3600)
     _scheduler.start()
 

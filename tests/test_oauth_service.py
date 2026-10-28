@@ -20,6 +20,8 @@ def configured_client(monkeypatch):
         session.execute(delete(main.RankingSnapshot))
         session.execute(delete(main.OAuthToken))
         session.execute(delete(main.ExchangeRate))
+        session.execute(delete(main.OAuthHandshake))
+        session.execute(delete(main.SchedulerStatus))
         session.commit()
     return TestClient(main.app)
 
@@ -29,7 +31,9 @@ def test_health_reports_complete_configuration(monkeypatch):
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "config_complete": True,
-                               "persistent_storage": False, "token_valid": False}
+                               "persistent_storage": False, "token_valid": False,
+                               "authorization_present": False,
+                               "scheduler_enabled": False, "scheduler": None}
 
 
 def test_root_serves_dashboard(monkeypatch):
@@ -58,6 +62,12 @@ def test_login_redirect_contains_state_without_secret(monkeypatch):
     ).rstrip(b"=").decode("ascii")
     assert query["code_challenge"] == [expected_challenge]
     assert query["code_challenge_method"] == ["S256"]
+    main._store.clear()
+    with main.Session(main.engine) as session:
+        handshake = session.get(main.OAuthHandshake, 1)
+        assert handshake.state == query["state"][0]
+        assert main._decrypt(handshake.code_verifier) == verifier
+        assert handshake.expires_at > 0
 
 
 def test_callback_rejects_missing_or_wrong_state(monkeypatch):
